@@ -412,27 +412,49 @@ export function calculateScoreBreakdown(
 export function getConnectedCells(grid: GridCell[][], dayTime: number, storedPower: number): Set<string> {
   const { poweredCells } = calculatePowerNetwork(grid, dayTime, storedPower);
   
-  const connectedCells = new Set<string>();
-  const visited = new Set<string>();
-  const queue: Array<{ x: number; y: number }> = [];
+  const key = (x: number, y: number) => `${x},${y}`;
+  const sourceKeys: string[] = [];
+  const sinkSet = new Set<string>();
 
   for (let y = 0; y < GRID_SIZE; y++) {
     for (let x = 0; x < GRID_SIZE; x++) {
       const cell = grid[y][x];
-      if (
-        !cell.faulty &&
-        (cell.type === 'windmill' || cell.type === 'battery')
-      ) {
-        queue.push({ x, y });
-        visited.add(`${x},${y}`);
-        connectedCells.add(`${x},${y}`);
+      if (cell.faulty) continue;
+      const k = key(x, y);
+      if (cell.type === 'windmill' || cell.type === 'battery') {
+        sourceKeys.push(k);
+      }
+      const isPoweredConsumer =
+        (cell.type === 'house' || cell.type === 'factory') &&
+        poweredCells.has(k);
+      if (isPoweredConsumer || cell.type === 'battery') {
+        sinkSet.add(k);
       }
     }
+  }
+
+  if (sourceKeys.length === 0 || sinkSet.size === 0) {
+    return new Set<string>();
+  }
+
+  const parent = new Map<string, string | null>();
+  const level = new Map<string, number>();
+  const visited = new Set<string>();
+  const queue: Array<{ x: number; y: number }> = [];
+
+  for (const sk of sourceKeys) {
+    const [sx, sy] = sk.split(',').map(Number);
+    parent.set(sk, null);
+    level.set(sk, 0);
+    visited.add(sk);
+    queue.push({ x: sx, y: sy });
   }
 
   while (queue.length > 0) {
     const current = queue.shift()!;
     const currentCell = grid[current.y][current.x];
+    const currentKey = key(current.x, current.y);
+    const currentLevel = level.get(currentKey) ?? 0;
 
     for (let dir = 0; dir < 4; dir++) {
       const [dx, dy] = DIR_OFFSETS[dir];
@@ -444,8 +466,8 @@ export function getConnectedCells(grid: GridCell[][], dayTime: number, storedPow
       const neighbor = grid[ny][nx];
       if (neighbor.faulty) continue;
 
-      const key = `${nx},${ny}`;
-      if (visited.has(key)) continue;
+      const neighborKey = key(nx, ny);
+      if (visited.has(neighborKey)) continue;
 
       let canConnectFromCurrent = false;
       if (currentCell.type === 'wire') {
@@ -472,8 +494,9 @@ export function getConnectedCells(grid: GridCell[][], dayTime: number, storedPow
       }
 
       if (canConnectFromCurrent && canConnectFromNeighbor) {
-        visited.add(key);
-        connectedCells.add(key);
+        visited.add(neighborKey);
+        parent.set(neighborKey, currentKey);
+        level.set(neighborKey, currentLevel + 1);
         if (neighbor.type === 'wire') {
           queue.push({ x: nx, y: ny });
         }
@@ -481,5 +504,39 @@ export function getConnectedCells(grid: GridCell[][], dayTime: number, storedPow
     }
   }
 
-  return connectedCells;
+  const hasSink = new Map<string, boolean>();
+  for (const k of visited) {
+    hasSink.set(k, sinkSet.has(k));
+  }
+
+  const nodesByLevel: Array<Array<{ x: number; y: number; key: string }>> = [];
+  for (const [k, lvl] of level) {
+    const [x, y] = k.split(',').map(Number);
+    if (!nodesByLevel[lvl]) nodesByLevel[lvl] = [];
+    nodesByLevel[lvl].push({ x, y, key: k });
+  }
+
+  for (let lvl = nodesByLevel.length - 1; lvl >= 0; lvl--) {
+    const nodes = nodesByLevel[lvl];
+    if (!nodes) continue;
+    for (const node of nodes) {
+      if (hasSink.get(node.key)) {
+        const p = parent.get(node.key);
+        if (p !== null && p !== undefined) {
+          hasSink.set(p, true);
+        }
+      }
+    }
+  }
+
+  const usefulWires = new Set<string>();
+  for (const k of visited) {
+    const [x, y] = k.split(',').map(Number);
+    const cell = grid[y][x];
+    if (cell.type === 'wire' && hasSink.get(k)) {
+      usefulWires.add(k);
+    }
+  }
+
+  return usefulWires;
 }
